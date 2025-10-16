@@ -200,6 +200,8 @@ class ProteinMPNN(torch.nn.Module):
         randn = feature_dict[
             "randn"
         ]  # [B,L] - random numbers for decoding order; only the first entry is used since decoding within a batch needs to match for symmetry
+
+
         temperature = feature_dict[
             "temperature"
         ]  # float - sampling temperature; prob = softmax(logits/temperature)
@@ -212,6 +214,12 @@ class ProteinMPNN(torch.nn.Module):
 
         B, L = S_true.shape
         device = S_true.device
+        
+        # Get per-residue temperature (defaults to global temp if not provided)
+        temperature_per_residue = feature_dict.get(
+            "temperature_per_residue", 
+            temperature * torch.ones([B, L], device=device)
+        )  # [B, L]
 
         h_V, h_E, E_idx = self.encode(feature_dict)
 
@@ -242,6 +250,7 @@ class ProteinMPNN(torch.nn.Module):
             chain_mask = chain_mask.repeat(B_decoder, 1)
             mask = mask.repeat(B_decoder, 1)
             bias = bias.repeat(B_decoder, 1, 1)
+            temperature_per_residue = temperature_per_residue.repeat(B_decoder, 1)
 
             all_probs = torch.zeros(
                 (B_decoder, L, 20), device=device, dtype=torch.float32
@@ -307,6 +316,7 @@ class ProteinMPNN(torch.nn.Module):
                         layer(h_V_t, h_ESV_t, mask_V=mask_t),
                     )
 
+                
                 h_V_t = torch.gather(
                     h_V_stack[-1],
                     1,
@@ -315,9 +325,16 @@ class ProteinMPNN(torch.nn.Module):
                 logits = self.W_out(h_V_t)  # [B,21]
                 log_probs = torch.nn.functional.log_softmax(logits, dim=-1)  # [B,21]
 
+                # Get temperature for this position
+                temperature_t = torch.gather(
+                    temperature_per_residue, 1, t[:, None]
+                )[:, 0]  # [B]
+                
                 probs = torch.nn.functional.softmax(
-                    (logits + bias_t) / temperature, dim=-1
+                    (logits + bias_t) / temperature_t[:, None], dim=-1
                 )  # [B,21]
+
+
                 probs_sample = probs[:, :20] / torch.sum(
                     probs[:, :20], dim=-1, keepdim=True
                 )  # hard omit X #[B,20]
@@ -392,6 +409,7 @@ class ProteinMPNN(torch.nn.Module):
             chain_mask = chain_mask.repeat(B_decoder, 1)
             mask = mask.repeat(B_decoder, 1)
             bias = bias.repeat(B_decoder, 1, 1)
+            temperature_per_residue = temperature_per_residue.repeat(B_decoder, 1)
 
             all_probs = torch.zeros(
                 (B_decoder, L, 20), device=device, dtype=torch.float32
@@ -443,12 +461,15 @@ class ProteinMPNN(torch.nn.Module):
                     ).float()  # [B,21]
                     total_logits += symmetry_weights[t] * logits
 
+                # Use the temperature from the first residue in the symmetric group
+                temperature_t = temperature_per_residue[:, t_list[0]]  # [B]
                 probs = torch.nn.functional.softmax(
-                    (total_logits + bias_t) / temperature, dim=-1
+                    (total_logits + bias_t) / temperature_t[:, None], dim=-1
                 )  # [B,21]
                 probs_sample = probs[:, :20] / torch.sum(
                     probs[:, :20], dim=-1, keepdim=True
                 )  # hard omit X #[B,20]
+
                 S_t = torch.multinomial(probs_sample, 1)[:, 0]  # [B]
                 for t in t_list:
                     chain_mask_t = chain_mask[:, t]  # [B]

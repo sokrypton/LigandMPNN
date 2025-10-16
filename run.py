@@ -164,6 +164,12 @@ def main(args) -> None:
             for pdb in pdb_paths:
                 bias_AA_per_residue_multi[pdb] = bias_AA_per_residue
 
+    # Parse per-residue temperature (if provided)
+    temperature_per_residue_dict = {}
+    if args.temperature_per_residue:
+        with open(args.temperature_per_residue, "r") as fh:
+            temperature_per_residue_dict = json.load(fh)  # {"A12": 0.5, "A13": 0.2}
+
     if args.omit_AA_per_residue_multi:
         with open(args.omit_AA_per_residue_multi, "r") as fh:
             omit_AA_per_residue_multi = json.load(
@@ -241,6 +247,24 @@ def main(args) -> None:
                         if amino_acid in alphabet:
                             j1 = restype_str_to_int[amino_acid]
                             omit_AA_per_residue[i1, j1] = 1.0
+
+        # Create per-residue temperature tensor
+        # Initialize ALL positions with the global temperature
+        temperature_per_residue = (
+            torch.ones([len(encoded_residues)], device=device, dtype=torch.float32)
+            * args.temperature
+        )
+        
+        # Override specific positions if per-residue temperatures are provided
+        if temperature_per_residue_dict:
+            for residue_name, temp_value in temperature_per_residue_dict.items():
+                if residue_name in encoded_residues:
+                    i1 = encoded_residue_dict[residue_name]
+                    temperature_per_residue[i1] = float(temp_value)
+            
+            if args.verbose:
+                print(f"Using global temperature: {args.temperature}")
+                print(f"Overriding {len([k for k in temperature_per_residue_dict.keys() if k in encoded_residues])} positions with custom temperatures")
 
         fixed_positions = torch.tensor(
             [int(item not in fixed_residues) for item in encoded_residues],
@@ -403,6 +427,7 @@ def main(args) -> None:
             B, L, _, _ = feature_dict["X"].shape  # batch size should be 1 for now.
             # add additional keys to the feature dictionary
             feature_dict["temperature"] = args.temperature
+            feature_dict["temperature_per_residue"] = temperature_per_residue[None, :]  # [1, L]
             feature_dict["bias"] = (
                 (-1e8 * omit_AA[None, None, :] + bias_AA).repeat([1, L, 1])
                 + bias_AA_per_residue[None]
@@ -859,6 +884,12 @@ if __name__ == "__main__":
         type=float,
         default=0.1,
         help="Temperature to sample sequences.",
+    )
+    argparser.add_argument(
+    "--temperature_per_residue",
+    type=str,
+    default="",
+    help="Path to json mapping of temperature per residue {'A12': 0.5, 'A13': 0.2, 'B5': 0.8}. Residues not specified will use the global --temperature value.",
     )
     argparser.add_argument(
         "--save_stats", type=int, default=0, help="Save output statistics"
