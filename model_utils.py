@@ -1225,33 +1225,26 @@ class ProteinFeaturesLigand(torch.nn.Module):
 
         D_neighbors, E_idx = self._dist(Ca, mask)
 
-        RBF_all = []
-        RBF_all.append(self._rbf(D_neighbors))  # Ca-Ca
-        RBF_all.append(self._get_rbf(N, N, E_idx))  # N-N
-        RBF_all.append(self._get_rbf(C, C, E_idx))  # C-C
-        RBF_all.append(self._get_rbf(O, O, E_idx))  # O-O
-        RBF_all.append(self._get_rbf(Cb, Cb, E_idx))  # Cb-Cb
-        RBF_all.append(self._get_rbf(Ca, N, E_idx))  # Ca-N
-        RBF_all.append(self._get_rbf(Ca, C, E_idx))  # Ca-C
-        RBF_all.append(self._get_rbf(Ca, O, E_idx))  # Ca-O
-        RBF_all.append(self._get_rbf(Ca, Cb, E_idx))  # Ca-Cb
-        RBF_all.append(self._get_rbf(N, C, E_idx))  # N-C
-        RBF_all.append(self._get_rbf(N, O, E_idx))  # N-O
-        RBF_all.append(self._get_rbf(N, Cb, E_idx))  # N-Cb
-        RBF_all.append(self._get_rbf(Cb, C, E_idx))  # Cb-C
-        RBF_all.append(self._get_rbf(Cb, O, E_idx))  # Cb-O
-        RBF_all.append(self._get_rbf(O, C, E_idx))  # O-C
-        RBF_all.append(self._get_rbf(N, Ca, E_idx))  # N-Ca
-        RBF_all.append(self._get_rbf(C, Ca, E_idx))  # C-Ca
-        RBF_all.append(self._get_rbf(O, Ca, E_idx))  # O-Ca
-        RBF_all.append(self._get_rbf(Cb, Ca, E_idx))  # Cb-Ca
-        RBF_all.append(self._get_rbf(C, N, E_idx))  # C-N
-        RBF_all.append(self._get_rbf(O, N, E_idx))  # O-N
-        RBF_all.append(self._get_rbf(Cb, N, E_idx))  # Cb-N
-        RBF_all.append(self._get_rbf(C, Cb, E_idx))  # C-Cb
-        RBF_all.append(self._get_rbf(O, Cb, E_idx))  # O-Cb
-        RBF_all.append(self._get_rbf(C, O, E_idx))  # C-O
-        RBF_all = torch.cat(tuple(RBF_all), dim=-1)
+        atoms = torch.stack([Ca, N, C, O, Cb], dim=-2)
+        p_indices = [
+            (0,0),(1,1),(2,2),(3,3),(4,4),
+            (0,1),(0,2),(0,3),(0,4),
+            (1,2),(1,3),(1,4),
+            (4,2),(4,3),
+            (3,2),
+            (1,0),(2,0),(3,0),(4,0),
+            (2,1),(3,1),(4,1),
+            (2,4),(3,4),
+            (2,3)
+        ]
+
+        atom_pairs_A = atoms[:, :, None, [p[0] for p in p_indices], None, :]
+        atom_pairs_B = atoms[:, None, :, None, [p[1] for p in p_indices], :]
+        dist_matrix_pairs = torch.sqrt(torch.sum((atom_pairs_A - atom_pairs_B)**2, dim=-1) + 1e-6)
+
+        D_neighbors_all = gather_edges(dist_matrix_pairs, E_idx)
+        RBF_all = self._rbf(D_neighbors_all)
+        RBF_all = RBF_all.reshape(RBF_all.shape[0], RBF_all.shape[1], RBF_all.shape[2], -1)
 
         offset = R_idx[:, :, None] - R_idx[:, None, :]
         offset = gather_edges(offset[:, :, :, None], E_idx)[:, :, :, 0]  # [B, L, K]
@@ -1315,22 +1308,14 @@ class ProteinFeaturesLigand(torch.nn.Module):
         )  # [B, L, M, 147]
         Y_t_1hot = self.type_linear(Y_t_1hot_.float())
 
-        D_N_Y = self._rbf(
-            torch.sqrt(torch.sum((N[:, :, None, :] - Y) ** 2, -1) + 1e-6)
-        )  # [B, L, M, num_bins]
-        D_Ca_Y = self._rbf(
-            torch.sqrt(torch.sum((Ca[:, :, None, :] - Y) ** 2, -1) + 1e-6)
-        )
-        D_C_Y = self._rbf(torch.sqrt(torch.sum((C[:, :, None, :] - Y) ** 2, -1) + 1e-6))
-        D_O_Y = self._rbf(torch.sqrt(torch.sum((O[:, :, None, :] - Y) ** 2, -1) + 1e-6))
-        D_Cb_Y = self._rbf(
-            torch.sqrt(torch.sum((Cb[:, :, None, :] - Y) ** 2, -1) + 1e-6)
-        )
+        atom_types = torch.stack([N, Ca, C, O, Cb], dim=2)
+        D_Y = torch.sqrt(torch.sum((atom_types[:, :, :, None, :] - Y[:, :, None, :, :])**2, dim=-1) + 1e-6)
+        rbf_D_Y = self._rbf(D_Y)
 
         f_angles = self._make_angle_features(N, Ca, C, Y)  # [B, L, M, 4]
 
         D_all = torch.cat(
-            (D_N_Y, D_Ca_Y, D_C_Y, D_O_Y, D_Cb_Y, Y_t_1hot, f_angles), dim=-1
+            (rbf_D_Y.reshape(B, L, -1, self.num_rbf*5), Y_t_1hot, f_angles), dim=-1
         )  # [B,L,M,5*num_bins+5]
         V = self.node_project_down(D_all)  # [B, L, M, node_features]
         V = self.norm_nodes(V)
@@ -1425,33 +1410,26 @@ class ProteinFeatures(torch.nn.Module):
 
         D_neighbors, E_idx = self._dist(Ca, mask)
 
-        RBF_all = []
-        RBF_all.append(self._rbf(D_neighbors))  # Ca-Ca
-        RBF_all.append(self._get_rbf(N, N, E_idx))  # N-N
-        RBF_all.append(self._get_rbf(C, C, E_idx))  # C-C
-        RBF_all.append(self._get_rbf(O, O, E_idx))  # O-O
-        RBF_all.append(self._get_rbf(Cb, Cb, E_idx))  # Cb-Cb
-        RBF_all.append(self._get_rbf(Ca, N, E_idx))  # Ca-N
-        RBF_all.append(self._get_rbf(Ca, C, E_idx))  # Ca-C
-        RBF_all.append(self._get_rbf(Ca, O, E_idx))  # Ca-O
-        RBF_all.append(self._get_rbf(Ca, Cb, E_idx))  # Ca-Cb
-        RBF_all.append(self._get_rbf(N, C, E_idx))  # N-C
-        RBF_all.append(self._get_rbf(N, O, E_idx))  # N-O
-        RBF_all.append(self._get_rbf(N, Cb, E_idx))  # N-Cb
-        RBF_all.append(self._get_rbf(Cb, C, E_idx))  # Cb-C
-        RBF_all.append(self._get_rbf(Cb, O, E_idx))  # Cb-O
-        RBF_all.append(self._get_rbf(O, C, E_idx))  # O-C
-        RBF_all.append(self._get_rbf(N, Ca, E_idx))  # N-Ca
-        RBF_all.append(self._get_rbf(C, Ca, E_idx))  # C-Ca
-        RBF_all.append(self._get_rbf(O, Ca, E_idx))  # O-Ca
-        RBF_all.append(self._get_rbf(Cb, Ca, E_idx))  # Cb-Ca
-        RBF_all.append(self._get_rbf(C, N, E_idx))  # C-N
-        RBF_all.append(self._get_rbf(O, N, E_idx))  # O-N
-        RBF_all.append(self._get_rbf(Cb, N, E_idx))  # Cb-N
-        RBF_all.append(self._get_rbf(C, Cb, E_idx))  # C-Cb
-        RBF_all.append(self._get_rbf(O, Cb, E_idx))  # O-Cb
-        RBF_all.append(self._get_rbf(C, O, E_idx))  # C-O
-        RBF_all = torch.cat(tuple(RBF_all), dim=-1)
+        atoms = torch.stack([Ca, N, C, O, Cb], dim=-2)
+        p_indices = [
+            (0,0),(1,1),(2,2),(3,3),(4,4),
+            (0,1),(0,2),(0,3),(0,4),
+            (1,2),(1,3),(1,4),
+            (4,2),(4,3),
+            (3,2),
+            (1,0),(2,0),(3,0),(4,0),
+            (2,1),(3,1),(4,1),
+            (2,4),(3,4),
+            (2,3)
+        ]
+
+        atom_pairs_A = atoms[:, :, None, [p[0] for p in p_indices], None, :]
+        atom_pairs_B = atoms[:, None, :, None, [p[1] for p in p_indices], :]
+        dist_matrix_pairs = torch.sqrt(torch.sum((atom_pairs_A - atom_pairs_B)**2, dim=-1) + 1e-6)
+
+        D_neighbors_all = gather_edges(dist_matrix_pairs, E_idx)
+        RBF_all = self._rbf(D_neighbors_all)
+        RBF_all = RBF_all.reshape(RBF_all.shape[0], RBF_all.shape[1], RBF_all.shape[2], -1)
 
         offset = R_idx[:, :, None] - R_idx[:, None, :]
         offset = gather_edges(offset[:, :, :, None], E_idx)[:, :, :, 0]  # [B, L, K]
@@ -1551,33 +1529,26 @@ class ProteinFeaturesMembrane(torch.nn.Module):
 
         D_neighbors, E_idx = self._dist(Ca, mask)
 
-        RBF_all = []
-        RBF_all.append(self._rbf(D_neighbors))  # Ca-Ca
-        RBF_all.append(self._get_rbf(N, N, E_idx))  # N-N
-        RBF_all.append(self._get_rbf(C, C, E_idx))  # C-C
-        RBF_all.append(self._get_rbf(O, O, E_idx))  # O-O
-        RBF_all.append(self._get_rbf(Cb, Cb, E_idx))  # Cb-Cb
-        RBF_all.append(self._get_rbf(Ca, N, E_idx))  # Ca-N
-        RBF_all.append(self._get_rbf(Ca, C, E_idx))  # Ca-C
-        RBF_all.append(self._get_rbf(Ca, O, E_idx))  # Ca-O
-        RBF_all.append(self._get_rbf(Ca, Cb, E_idx))  # Ca-Cb
-        RBF_all.append(self._get_rbf(N, C, E_idx))  # N-C
-        RBF_all.append(self._get_rbf(N, O, E_idx))  # N-O
-        RBF_all.append(self._get_rbf(N, Cb, E_idx))  # N-Cb
-        RBF_all.append(self._get_rbf(Cb, C, E_idx))  # Cb-C
-        RBF_all.append(self._get_rbf(Cb, O, E_idx))  # Cb-O
-        RBF_all.append(self._get_rbf(O, C, E_idx))  # O-C
-        RBF_all.append(self._get_rbf(N, Ca, E_idx))  # N-Ca
-        RBF_all.append(self._get_rbf(C, Ca, E_idx))  # C-Ca
-        RBF_all.append(self._get_rbf(O, Ca, E_idx))  # O-Ca
-        RBF_all.append(self._get_rbf(Cb, Ca, E_idx))  # Cb-Ca
-        RBF_all.append(self._get_rbf(C, N, E_idx))  # C-N
-        RBF_all.append(self._get_rbf(O, N, E_idx))  # O-N
-        RBF_all.append(self._get_rbf(Cb, N, E_idx))  # Cb-N
-        RBF_all.append(self._get_rbf(C, Cb, E_idx))  # C-Cb
-        RBF_all.append(self._get_rbf(O, Cb, E_idx))  # O-Cb
-        RBF_all.append(self._get_rbf(C, O, E_idx))  # C-O
-        RBF_all = torch.cat(tuple(RBF_all), dim=-1)
+        atoms = torch.stack([Ca, N, C, O, Cb], dim=-2)
+        p_indices = [
+            (0,0),(1,1),(2,2),(3,3),(4,4),
+            (0,1),(0,2),(0,3),(0,4),
+            (1,2),(1,3),(1,4),
+            (4,2),(4,3),
+            (3,2),
+            (1,0),(2,0),(3,0),(4,0),
+            (2,1),(3,1),(4,1),
+            (2,4),(3,4),
+            (2,3)
+        ]
+
+        atom_pairs_A = atoms[:, :, None, [p[0] for p in p_indices], None, :]
+        atom_pairs_B = atoms[:, None, :, None, [p[1] for p in p_indices], :]
+        dist_matrix_pairs = torch.sqrt(torch.sum((atom_pairs_A - atom_pairs_B)**2, dim=-1) + 1e-6)
+
+        D_neighbors_all = gather_edges(dist_matrix_pairs, E_idx)
+        RBF_all = self._rbf(D_neighbors_all)
+        RBF_all = RBF_all.reshape(RBF_all.shape[0], RBF_all.shape[1], RBF_all.shape[2], -1)
 
         offset = R_idx[:, :, None] - R_idx[:, None, :]
         offset = gather_edges(offset[:, :, :, None], E_idx)[:, :, :, 0]  # [B, L, K]
