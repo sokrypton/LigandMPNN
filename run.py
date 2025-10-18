@@ -88,6 +88,7 @@ def main(args) -> None:
     )
 
     model.load_state_dict(checkpoint["model_state_dict"])
+    model = torch.compile(model)
     model.to(device)
     model.eval()
 
